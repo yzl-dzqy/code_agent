@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "echo '{\"additionalContext\": \"Hook 系统已激活，危险命令将被拦截\"}'"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "command": "python .hooks/check_bash.py"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "command": "python .hooks/audit_log.py"
+      }
+    ]
+  }
+}
