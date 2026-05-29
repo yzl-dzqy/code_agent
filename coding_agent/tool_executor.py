@@ -18,7 +18,7 @@ from .utils.log import log, preview_text
 from .utils.metrics import METRICS
 
 if TYPE_CHECKING:
-    from .agent import AgentCallbacks
+    from .agent_runtime import AgentCallbacks
     from .context.compactor import Compactor
     from .context.window import ContextWindow
     from .tools.registry import ToolRegistry

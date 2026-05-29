@@ -59,7 +59,7 @@ def _print_todo_board():
 
 # ── 斜杠命令分发 ──
 
-def _handle_slash(cmd: str, text: str, agent, provider) -> bool:
+def _handle_slash(cmd: str, text: str, agent) -> bool:
     """
     处理斜杠命令，返回 True 表示已处理（调用方应 continue）。
 
@@ -80,7 +80,7 @@ def _handle_slash(cmd: str, text: str, agent, provider) -> bool:
         "/export":   lambda: print(f"\033[36m已导出:\033[0m {export_conversation(agent.get_history())}"),
         "/prompt":   lambda: print(f"--- System Prompt ---\n{agent.prompt_builder.build()}\n--- End ---"),
         "/sections": lambda: _show_sections(agent),
-        "/health":   lambda: _show_health(provider),
+        "/health":   lambda: _show_health(agent),
         "/memories": _show_memories,
         "/hooks":    lambda: print(f"\033[36m[Hooks]\033[0m {agent.hooks.summary()}"),
         "/skills":   _show_skills,
@@ -93,17 +93,24 @@ def _handle_slash(cmd: str, text: str, agent, provider) -> bool:
 
     # /model [name] 需要参数解析
     if cmd == "/model":
-        parts = text.split(None, 1)
+        parts = text.split()
         if len(parts) == 1:
-            print(f"\033[36m当前模型:\033[0m {provider.model_name}")
+            current = f"{agent.provider_name}:{agent.provider.model_name}"
+            print(f"\033[36m当前模型:\033[0m {current}")
             for m in CFG.known_models:
-                mark = " ◀" if m == provider.model_name else ""
+                mark = " ◀" if m == current else ""
                 print(f"  {m}{mark}")
+            print("用法: /model <provider:model> 或 /model <provider> <model>")
         else:
-            old = provider.model_name
-            provider.model_name = parts[1].strip()
-            log("INFO", "model_switched", f"{old} → {provider.model_name}")
-            print(f"\033[36m已切换:\033[0m {old} → \033[1m{provider.model_name}\033[0m")
+            try:
+                if len(parts) >= 3:
+                    old, new = agent.switch_model(parts[2], provider_name=parts[1])
+                else:
+                    old, new = agent.switch_model(parts[1])
+            except Exception as exc:
+                print(f"\033[31m切换失败:\033[0m {exc}")
+            else:
+                print(f"\033[36m已切换:\033[0m {old.ref} → \033[1m{new.ref}\033[0m")
         return True
 
     return True  # 未知斜杠命令，静默忽略
@@ -116,10 +123,16 @@ def _show_sections(agent):
         print(f"  {h}")
 
 
-def _show_health(provider):
-    key_status = "已配置" if CFG.gemini_api_key else "未配置"
-    print(f"\033[36m[健康]\033[0m provider={CFG.llm_provider} "
-          f"model={provider.model_name} key={key_status}")
+def _show_health(agent):
+    key_map = {
+        "gemini": CFG.gemini_api_key,
+        "openai": CFG.openai_api_key,
+        "claude": CFG.anthropic_api_key,
+        "ollama": "local",
+    }
+    key_status = "已配置" if key_map.get(agent.provider_name) else "未配置"
+    print(f"\033[36m[健康]\033[0m provider={agent.provider_name} "
+          f"model={agent.provider.model_name} key={key_status}")
 
 
 def _show_memories():
@@ -261,7 +274,7 @@ def main(initial_query: str = ""):
             # 斜杠命令
             if low.startswith("/"):
                 cmd = low.split()[0]
-                _handle_slash(cmd, text, agent, provider)
+                _handle_slash(cmd, text, agent)
                 continue
 
             # 正常对话

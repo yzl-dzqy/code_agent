@@ -267,7 +267,7 @@ class ModelSwitchModal(ModalScreen[str | None]):
                 id="model_list",
             )
             yield Static("[dim]或输入自定义模型：[/]", markup=True)
-            yield Input(id="custom_input", placeholder="如 gemini-2.5-pro")
+            yield Input(id="custom_input", placeholder="如 openai:gpt-4o")
             with Horizontal(id="btn_row"):
                 yield Button("确认", id="btn_ok", variant="primary")
                 yield Button("取消", id="btn_cancel")
@@ -482,8 +482,9 @@ class AgentTUIApp(App[None]):
         return any(re.search(p, text) for p in patterns)
 
     def _update_title(self):
+        provider = self._agent.provider_name if self._agent else CFG.llm_provider
         name = self._provider.model_name if self._provider else CFG.llm_model
-        self.title = f"Coding Agent - {CFG.llm_provider}: {name}"
+        self.title = f"Coding Agent - {provider}: {name}"
 
     def _tick_clock(self):
         self.query_one("#clock_label", Label).update(
@@ -596,9 +597,34 @@ class AgentTUIApp(App[None]):
         """处理 TUI 斜杠命令，返回 True 表示已处理。"""
         low = text.lower()
         agent = self._agent
+        parts = text.split()
+        cmd = low.split()[0]
+
+        if cmd == "/model":
+            if len(parts) == 1:
+                current = f"{self._agent.provider_name}:{self._provider.model_name}"
+                lines = ["[bold cyan]模型[/]", current, "", "[dim]可用模型:[/]"]
+                lines.extend(
+                    f"  {m}{'  ◀' if m == current else ''}"
+                    for m in CFG.known_models
+                )
+                lines.append("[dim]用法: /model <provider:model> 或 /model <provider> <model>[/]")
+                self._chat_write("\n".join(lines))
+            else:
+                try:
+                    if len(parts) >= 3:
+                        old, new = self._agent.switch_model(parts[2], provider_name=parts[1])
+                    else:
+                        old, new = self._agent.switch_model(parts[1])
+                except Exception as exc:
+                    self._chat_write(f"[red]切换失败:[/] {exc}")
+                else:
+                    self._provider = self._agent.provider
+                    self._update_title()
+                    self._chat_write(f"[dim]模型切换: {old.ref} → [bold]{new.ref}[/][/]")
+            return True
+
         handlers = {
-            "/model": lambda: self._chat_write(
-                f"[bold cyan]模型[/]\n{self._provider.model_name}"),
             "/workdir": lambda: self._chat_write(
                 f"[bold cyan]工作目录[/]\n{CFG.workdir}"),
             "/hooks": lambda: self._chat_write(
@@ -629,8 +655,6 @@ class AgentTUIApp(App[None]):
 
    
         }
-
-        cmd = low.split()[0]
         if cmd in handlers:
             handlers[cmd]()
             return True
@@ -771,17 +795,20 @@ class AgentTUIApp(App[None]):
 
     def action_switch_model(self):
         def on_selected(model: str | None):
-            if not model or not self._provider:
+            if not model or not self._provider or not self._agent:
                 return
-            old = self._provider.model_name
-            self._provider.model_name = model
+            try:
+                old, new = self._agent.switch_model(model)
+            except Exception as exc:
+                self._chat_write(f"[red]切换失败:[/] {exc}")
+                return
+            self._provider = self._agent.provider
             self._update_title()
-            log("INFO", "model_switched", f"{old} → {model}")
-            self._chat_write(
-                f"[dim]模型切换: {old} → [bold]{model}[/][/]")
+            self._chat_write(f"[dim]模型切换: {old.ref} → [bold]{new.ref}[/][/]")
 
         self.push_screen(ModelSwitchModal(
-            self._provider.model_name if self._provider else ""),
+            f"{self._agent.provider_name}:{self._provider.model_name}"
+            if self._provider and self._agent else ""),
             callback=on_selected)
 
     def action_export_chat(self):

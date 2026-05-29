@@ -9,8 +9,8 @@ ReAct Agent 核心循环。
   │   ├─ _process_skill_refs  解析 /skill    │
   │   └─ _run_loop            主循环         │
   │       ├─ _drain_all_queues  排空通知     │
-  │       ├─ _call_llm          LLM + 恢复   │
-  │       ├─ _handle_recovery   续写 / 压缩   │
+  │       ├─ LLMRecoveryPolicy  LLM + 恢复   │
+  │       ├─ recovery policy    续写 / 压缩   │
   │       ├─ _check_completion  完成态审计    │
   │       └─ _execute_tools     并行工具执行  │
   │           └─ _execute_single  Hook 集成   │
@@ -29,18 +29,17 @@ ReAct Agent 核心循环。
 from __future__ import annotations
 
 import json
-import random
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 import re
-from typing import Callable
 
+from .agent_runtime import AgentCallbacks, AgentEvent, QueryState
 from .config import CFG, SUBAGENT_PROMPT
 from .context.compactor import Compactor
 from .context.window import ContextWindow
 from .hooks import HookManager
-from .llm.base import LLMProvider, Message, ToolCall, ToolSpec
+from .llm.base import LLMProvider, Message, ToolCall
+from .llm.recovery import LLMRecoveryPolicy
+from .llm.registry import ModelSelection, get_provider, normalize_provider, parse_model_ref
 from .memory.long_term import MEMORY_MGR
 from .background import BG_MGR
 from .planner import PLANNER
@@ -54,41 +53,7 @@ from .utils.log import log, preview_text, wait_run
 from .utils.metrics import METRICS
 
 
-# ── 1. UI 回调接口 ──
-
-@dataclass
-class AgentCallbacks:
-    """
-    UI 层注入的回调集合。
-
-    Agent 本身不依赖任何 UI 框架，通过此 dataclass 解耦：
-      on_text       ← 最终回复文本（流式片段）
-      on_tool_start ← 工具调用开始（名称 + 参数）
-      on_tool_end   ← 工具调用完成（名称 + 结果摘要）
-      on_thinking   ← 模型思考过程
-      on_todo_update← 待办看板变更通知
-      on_system     ← 系统级消息（恢复提示等）
-      ask_user      ← 向用户追问（阻塞等待回复）
-    """
-    on_text: Callable[[str], None] | None = None
-    on_tool_start: Callable[[str, dict], None] | None = None
-    on_tool_end: Callable[[str, str], None] | None = None
-    on_thinking: Callable[[str], None] | None = None
-    on_todo_update: Callable[[], None] | None = None
-    on_system: Callable[[str], None] | None = None
-    ask_user: Callable[[str, str], str] | None = None
-
-
-@dataclass
-class QueryState:
-    """单次 Query 执行的跨 Turn 状态机。对标 claude-code-cli 中的 State。"""
-    turn_count: int = 1
-    max_output_tokens_recovery_count: int = 0
-    stop_hook_active: bool = False
-    transition_reason: str = ""
-    discovered_tools: set[str] = field(default_factory=set)
-
-# ── 2. Agent 主类 ──
+# ── 1. Agent 主类 ──
 
 class Agent:
     """
@@ -96,15 +61,6 @@ class Agent:
 
     支持并行工具调用、流式输出、错误自动恢复。
     """
-
-    # ── 错误恢复常量 ──
-    MAX_RECOVERY_ATTEMPTS = 3          # 最大重试次数
-    BACKOFF_BASE = 1.0                 # 退避基数（秒）
-    BACKOFF_MAX = 30.0                 # 退避上限（秒）
-    CONTINUATION_MSG = (               # max_tokens 截断时注入的续写指令
-        "输出长度已达上限，请直接从上次停止的位置继续——"
-        "不要复述、不要重复，必要时可从半句中间接续。"
-    )
 
     def __init__(
         self,
@@ -115,6 +71,7 @@ class Agent:
     ):
         # 核心依赖
         self.provider = provider
+        self.provider_name = normalize_provider(CFG.llm_provider)
         self.tools = tool_registry
         self.callbacks = callbacks or AgentCallbacks()
 
@@ -128,6 +85,7 @@ class Agent:
         self.window = ContextWindow()       # 滑动窗口消息历史
         self.memory = MEMORY_MGR            # 持久记忆（.agent/memory/）
         self.compactor = Compactor(provider) # 上下文压缩器
+        self.recovery = LLMRecoveryPolicy()
 
         # 并行工具执行器分离（类似 claude-code-cli 中的 StreamingToolExecutor）
         self._tool_executor = ToolExecutor(
@@ -141,12 +99,9 @@ class Agent:
         # 系统提示词管线（分段构建，支持 LLM 缓存）
         self.prompt_builder = SystemPromptBuilder(
             tool_registry=tool_registry,
-            provider_name=CFG.llm_provider,
+            provider_name=self.provider_name,
             model_name=provider.model_name,
         )
-
-        # 并行工具执行线程池
-        self._executor = ThreadPoolExecutor(max_workers=4)
 
         # 完成态检查标记（每次 chat 调用重置，防止死循环）
         self._completion_check_done = False
@@ -155,8 +110,46 @@ class Agent:
         SCHEDULER.start()
         self._fire_session_start()
 
+    def switch_model(self, model_ref: str, *, provider_name: str | None = None) -> tuple[ModelSelection, ModelSelection]:
+        """
+        运行时切换 provider/model。
+
+        与直接修改 provider.model_name 不同，这里会按 provider 重建 SDK client，
+        并同步压缩器、子代理工具和系统提示词中的模型信息。
+        """
+        if provider_name:
+            selection = ModelSelection(normalize_provider(provider_name), model_ref.strip())
+            if not selection.model:
+                raise ValueError("模型名称不能为空")
+        else:
+            selection = parse_model_ref(model_ref, self.provider_name)
+
+        old = ModelSelection(self.provider_name, self.provider.model_name)
+        new_provider = get_provider(
+            CFG,
+            provider_name=selection.provider,
+            model_name=selection.model,
+        )
+
+        self.provider = new_provider
+        self.provider_name = selection.provider
+        CFG.llm_provider = selection.provider
+        CFG.llm_model = selection.model
+
+        self.compactor = Compactor(new_provider)
+        self._tool_executor.compactor = self.compactor
+        self.prompt_builder.update_model_info(selection.provider, selection.model)
+
+        from .tools.builtin.agentic import set_agent_runtime
+        from .tools.builtin.image import set_llm_provider
+        set_llm_provider(new_provider)
+        set_agent_runtime(new_provider, self.tools)
+
+        log("INFO", "model_switched", f"{old.ref} → {selection.ref}")
+        return old, selection
+
     # ─────────────────────────────────────────────────────────
-    # 2.1 公开接口
+    # 1.1 公开接口
     # ─────────────────────────────────────────────────────────
 
     def chat(self, user_input: str) -> str:
@@ -197,7 +190,7 @@ class Agent:
             # 主动压缩：token 接近上限时不等 API 报错
             if self.window.needs_compaction(CFG.context_limit):
                 log("INFO", "proactive_compact")
-                yield {"type": "system", "content": "[恢复] 上下文接近限制，主动压缩…"}
+                yield AgentEvent("system", "[恢复] 上下文接近限制，主动压缩…")
                 self.window.messages = self.compactor.compact(self.window)
 
             log("INFO", "agent_step",
@@ -218,18 +211,30 @@ class Agent:
                     tool_specs.append(td.to_spec())
 
             # 3. 执行模型调用（包含异常重试与网络退避机制）
-            response = self._call_llm(system, tool_specs)
+            response = self.recovery.call(
+                self.provider,
+                self.window,
+                self.compactor,
+                tools=tool_specs,
+                system=system,
+                build_system=self.prompt_builder.build,
+                emit_system=self._emit_system,
+            )
             METRICS.record_model_turn()
             self._record_usage(response)
 
             # 4. 处理截断续写
-            if self._needs_continuation(response):
+            if self.recovery.needs_continuation(response):
                 state.max_output_tokens_recovery_count += 1
-                if state.max_output_tokens_recovery_count <= self.MAX_RECOVERY_ATTEMPTS:
+                if state.max_output_tokens_recovery_count <= self.recovery.max_attempts:
                     log("INFO", "recovery_max_tokens", f"count={state.max_output_tokens_recovery_count}")
-                    yield {"type": "system", "content": f"[恢复] 输出截断，续写中… ({state.max_output_tokens_recovery_count}/{self.MAX_RECOVERY_ATTEMPTS})"}
+                    yield AgentEvent(
+                        "system",
+                        f"[恢复] 输出截断，续写中… "
+                        f"({state.max_output_tokens_recovery_count}/{self.recovery.max_attempts})",
+                    )
                     self.window.add(response)
-                    self.window.add(Message.user(self.CONTINUATION_MSG))
+                    self.window.add(Message.user(self.recovery.continuation_message))
                     continue
                 log("WARN", "recovery_max_tokens_exhausted")
             
@@ -248,7 +253,7 @@ class Agent:
                 
                 text = response.content.strip() or "（模型未返回有效内容，请重试）"
                 self.window.add(response)
-                yield {"type": "text", "content": text}
+                yield AgentEvent("text", text)
                 return
 
             # 6. 分离出 Tool_use 收集并分发给外部执行逻辑
@@ -263,10 +268,10 @@ class Agent:
         final = f"达到工具调用轮数上限（{CFG.max_tool_rounds}），已停止。"
         self.window.add(Message.assistant(final))
         log("WARN", "max_steps_reached", str(CFG.max_tool_rounds))
-        yield {"type": "text", "content": final}
+        yield AgentEvent("text", final)
 
     # ─────────────────────────────────────────────────────────
-    # 2.3 通知排空
+    # 1.3 通知排空
     # ─────────────────────────────────────────────────────────
 
     def _drain_all_queues(self) -> None:
@@ -294,107 +299,7 @@ class Agent:
             log("INFO", "cron_notifications_injected", str(len(cron_notifs)))
 
     # ─────────────────────────────────────────────────────────
-    # 2.4 LLM 调用与错误恢复
-    # ─────────────────────────────────────────────────────────
-
-    def _call_llm(self, system: str, tools: list[ToolSpec]) -> Message:
-        """
-        调用 LLM，集成三条恢复路径：
-
-          路径 1 (malformed)   → 注入修复提示后重试
-          路径 2 (prompt过长)  → 自动 compact 后重试
-          路径 3 (网络/限流)   → 指数退避后重试
-        """
-        response: Message | None = None
-
-        # ── 路径 2 & 3：API 调用层重试 ──
-        for attempt in range(self.MAX_RECOVERY_ATTEMPTS + 1):
-            try:
-                response = wait_run(
-                    "推理",
-                    lambda: self.provider.chat(
-                        self.window.messages, tools=tools, system=system),
-                )
-                break
-            except Exception as exc:
-                err = str(exc).lower()
-
-                # 路径 2: prompt 过长 → compact 后重试
-                if any(k in err for k in (
-                    "too long", "overlong", "token limit",
-                    "context_length", "prompt_too_long", "request payload size",
-                )):
-                    log("WARN", "recovery_compact", f"attempt={attempt+1}")
-                    self._emit_system(
-                        f"[恢复] 上下文过长，自动压缩… (第 {attempt+1} 次)")
-                    self.window.messages = self.compactor.compact(self.window)
-                    system = self.prompt_builder.build()
-                    continue
-
-                # 路径 3: 网络/限流 → 指数退避
-                if attempt < self.MAX_RECOVERY_ATTEMPTS:
-                    delay = self._backoff_delay(attempt)
-                    log("WARN", "recovery_backoff",
-                        f"attempt={attempt+1} delay={delay:.1f}s error={str(exc)[:120]}")
-                    self._emit_system(
-                        f"[恢复] API 错误，{delay:.1f}s 后重试 "
-                        f"({attempt+1}/{self.MAX_RECOVERY_ATTEMPTS})")
-                    time.sleep(delay)
-                    continue
-
-                # 全部重试耗尽
-                log("ERROR", "recovery_exhausted", str(exc)[:200])
-                return Message.assistant(f"（API 调用失败：{str(exc)[:300]}）")
-
-        if response is None:
-            return Message.assistant("（未收到模型响应）")
-
-        # ── 路径 1：malformed 响应修复 ──
-        for repair in range(self.MAX_RECOVERY_ATTEMPTS):
-            if response.content or response.tool_calls:
-                break
-            log("WARN", "malformed_response",
-                f"repair={repair+1}/{self.MAX_RECOVERY_ATTEMPTS}")
-            hint = (
-                "[系统] 上一次响应为空或格式无效，请重新生成。"
-                "确保工具调用参数为合法 JSON，字段类型与 schema 一致。"
-            ) if repair < self.MAX_RECOVERY_ATTEMPTS - 1 else (
-                "[系统] 多次响应失败，请直接用自然语言回答。"
-            )
-            self.window.add(Message.user(hint))
-            try:
-                response = wait_run(
-                    "修复",
-                    lambda: self.provider.chat(
-                        self.window.messages, tools=tools, system=system),
-                )
-            except Exception:
-                break
-            METRICS.record_model_turn()
-
-        return response
-
-    def _backoff_delay(self, attempt: int) -> float:
-        """指数退避 + 随机抖动，避免惊群效应。"""
-        delay = min(self.BACKOFF_BASE * (2 ** attempt), self.BACKOFF_MAX)
-        return delay + random.uniform(0, 1)
-
-    @staticmethod
-    def _needs_continuation(response: Message) -> bool:
-        """判断响应是否因 max_tokens 被截断，需要续写。"""
-        finish = getattr(response, "finish_reason", "") or ""
-        if finish == "max_tokens":
-            return True
-        # 启发式：输出很长且末尾不像句子结束，多半被截断（7000 约为常见 max_tokens 下「整段回复」量级）
-        if (not response.tool_calls and response.content
-                and len(response.content) > 7000
-                and not response.content.rstrip().endswith(
-                    ("。", ".", "！", "!", "\n"))):
-            return True
-        return False
-
-    # ─────────────────────────────────────────────────────────
-    # 2.5 最终回复与完成态审计
+    # 1.4 最终回复与完成态审计
     # ─────────────────────────────────────────────────────────
 
     def _check_completion_state(self) -> str | None:
@@ -444,7 +349,7 @@ class Agent:
         )
 
     # ─────────────────────────────────────────────────────────
-    # 2.6 工具执行
+    # 1.5 工具执行
     # ─────────────────────────────────────────────────────────
 
     def _process_tool_calls(self, tool_calls: list[ToolCall]) -> set[str]:
@@ -488,7 +393,7 @@ class Agent:
             return set()
 
     # ─────────────────────────────────────────────────────────
-    # 2.7 辅助方法
+    # 1.6 辅助方法
     # ─────────────────────────────────────────────────────────
 
     def _process_skill_refs(self, text: str) -> str:

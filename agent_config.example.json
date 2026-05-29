@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "provider": "openai",
+    "model": "gemini-3-flash-preview",
+    "known_models": [
+      "openai:gemini-3-flash-preview",
+      "openai:gpt-4o",
+      "gemini:gemini-2.5-flash",
+      "claude:claude-sonnet-4-20250514",
+      "ollama:qwen2.5-coder:7b"
+    ]
+  },
+  "openai": {
+    "api_key": "YOUR_RELAY_API_KEY",
+    "base_url": "https://your-relay.example.com/v1"
+  }
+}
