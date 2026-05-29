@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""python -m coding_agent [--tui] 入口。"""
+"""python -m agent [--tui] 入口。"""
 
 from __future__ import annotations
 
@@ -10,29 +10,29 @@ from pathlib import Path
 
 
 def _import_tui_runner():
-    """兼容 `python -m coding_agent` 与 `python coding_agent` 两种入口。"""
+    """兼容 `python -m agent` 与 `python agent` 两种入口。"""
     try:
         from .ui.tui import run_tui
         return run_tui
     except ImportError:
-        from coding_agent.ui.tui import run_tui
+        from agent.ui.tui import run_tui
         return run_tui
 
 
 def _import_cli_main():
-    """兼容 `python -m coding_agent` 与 `python coding_agent` 两种入口。"""
+    """兼容 `python -m agent` 与 `python agent` 两种入口。"""
     try:
         from .ui.cli import main as cli_main
         return cli_main
     except ImportError:
-        from coding_agent.ui.cli import main as cli_main
+        from agent.ui.cli import main as cli_main
         return cli_main
 
 
 def _ensure_import_path() -> None:
     """
-    兼容 `python coding_agent` 直接运行目录的场景：
-    将包上级目录加入 sys.path，使 `import coding_agent.*` 可用。
+    兼容 `python agent` 直接运行目录的场景：
+    将包上级目录加入 sys.path，使 `import agent.*` 可用。
     """
     pkg_dir = Path(__file__).resolve().parent
     project_root = str(pkg_dir.parent)
@@ -42,7 +42,7 @@ def _ensure_import_path() -> None:
 
 def main():
     _ensure_import_path()
-    parser = argparse.ArgumentParser(description="Coding Agent")
+    parser = argparse.ArgumentParser(description="Agent")
     parser.add_argument("--cli", action="store_true", help="强制使用旧版纯文本 CLI 模式")
     parser.add_argument("--provider", type=str, help="LLM provider: gemini/openai/claude/ollama")
     parser.add_argument("--model", type=str, help="模型名称")

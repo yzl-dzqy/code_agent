@@ -154,7 +154,7 @@ class ToolRegistry:
         for _, module_name, _ in pkgutil.iter_modules([str(builtin_dir)]):
             importlib.import_module(f".builtin.{module_name}", package=__package__)
         # 确保外部模块注册的工具也被加载
-        for mod in ("coding_agent.planner", "coding_agent.memory.long_term", "coding_agent.skills", "coding_agent.tasks", "coding_agent.background", "coding_agent.scheduler", "coding_agent.worktree"):
+        for mod in ("agent.planner", "agent.memory.long_term", "agent.skills", "agent.tasks", "agent.background", "agent.scheduler", "agent.worktree"):
             try:
                 importlib.import_module(mod)
             except ImportError:

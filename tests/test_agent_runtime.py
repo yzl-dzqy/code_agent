@@ -9,17 +9,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from coding_agent.agent import Agent
-from coding_agent.config import AgentConfig, CFG
-from coding_agent.context.checkpoint import SessionCheckpoint
-from coding_agent.context.window import ContextWindow
-from coding_agent.hooks import HookResult
-from coding_agent.llm.base import Message, ToolCall
-from coding_agent.llm.recovery import LLMRecoveryPolicy
-from coding_agent.tool_policy import ToolExecutionPolicy
-from coding_agent.tools.base import ToolDef
-from coding_agent.tools.registry import ToolRegistry
-from coding_agent.utils.trace import TraceRecorder
+from agent.agent import Agent
+from agent.config import AgentConfig, CFG
+from agent.context.checkpoint import SessionCheckpoint
+from agent.context.window import ContextWindow
+from agent.hooks import HookResult
+from agent.llm.base import Message, ToolCall
+from agent.llm.recovery import LLMRecoveryPolicy
+from agent.tool_policy import ToolExecutionPolicy
+from agent.tools.base import ToolDef
+from agent.tools.registry import ToolRegistry
+from agent.utils.trace import TraceRecorder
 
 
 class FakeProvider:
@@ -135,7 +135,7 @@ class AgentLoopTests(unittest.TestCase):
         registry = ToolRegistry()
         seen_text: list[str] = []
 
-        with patch("coding_agent.agent.SCHEDULER.start", lambda: None):
+        with patch("agent.agent.SCHEDULER.start", lambda: None):
             agent = Agent(provider, registry, hooks=EmptyHooks())
             agent.callbacks.on_text = seen_text.append
             result = agent.chat("hello")
@@ -176,7 +176,7 @@ class AgentLoopTests(unittest.TestCase):
             should_defer=True,
         ))
 
-        with patch("coding_agent.agent.SCHEDULER.start", lambda: None):
+        with patch("agent.agent.SCHEDULER.start", lambda: None):
             agent = Agent(provider, registry, hooks=EmptyHooks())
             result = agent.chat("find tool")
 
@@ -200,7 +200,7 @@ class AgentLoopTests(unittest.TestCase):
         ))
 
         try:
-            with patch("coding_agent.agent.SCHEDULER.start", lambda: None):
+            with patch("agent.agent.SCHEDULER.start", lambda: None):
                 agent = Agent(provider, registry, hooks=EmptyHooks())
                 result = agent.chat("loop")
         finally:

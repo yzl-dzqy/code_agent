@@ -12,7 +12,7 @@ Hook 系统：在 Agent 主循环外注入扩展行为。
   - 1: 拦截（stderr 作为拦截原因）
   - 2: 注入消息（stderr 作为注入内容）
 
-配置文件：仅使用 coding_agent/.hooks/.hooks.json（严格模式）
+配置文件：仅使用 agent/.hooks/.hooks.json（严格模式）
 信任标记：仅使用 .agent/.agent_trusted（或 sdk_mode=True）
 """
 
@@ -76,7 +76,7 @@ class HookManager:
         self.hooks: dict[str, list[dict]] = {e: [] for e in HOOK_EVENTS}
         self._loaded = False
 
-        # 严格模式：仅允许固定路径（coding_agent/.hooks/.hooks.json）。
+        # 严格模式：仅允许固定路径（agent/.hooks/.hooks.json）。
         config_path = config_path or (CFG.pkg_dir / ".hooks" / ".hooks.json")
         self._config_path = config_path
         if config_path is not None and config_path.exists():
@@ -156,7 +156,7 @@ class HookManager:
                 env["HOOK_TOOL_OUTPUT"] = str(ctx["tool_output"])[:10000]
 
             try:
-                # hooks 命令在 coding_agent 根目录执行，
+                # hooks 命令在 agent 根目录执行，
                 # 这样配置中的相对路径（如 python .hooks/check_bash.py）可直接命中。
                 run_cwd = str(CFG.pkg_dir)
                 r = subprocess.run(
