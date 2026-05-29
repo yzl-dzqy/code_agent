@@ -10,7 +10,9 @@ import threading
 from datetime import datetime
 
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.text import Text
+from rich import box
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -111,6 +113,29 @@ def _metrics_rich() -> str:
         f"  [dim]Tool Time[/]  [bold]{METRICS.tool_wall_ms:.0f} ms[/]\n"
         f"  [dim]Tokens In[/]  [bold]{METRICS.prompt_tokens}[/]\n"
         f"  [dim]Tokens Out[/]  [bold]{METRICS.output_tokens}[/]\n"
+    )
+
+
+def _welcome_banner(provider: str, model: str, workdir: str) -> Panel:
+    """启动欢迎横幅，参考主流 code agent 的开场面板风格。"""
+    body = Text()
+    body.append("◆ ", style="bold cyan")
+    body.append("Coding Agent\n", style="bold")
+    body.append("现代化多模型编码助手\n\n", style="dim")
+    body.append("  模型  ", style="dim")
+    body.append(f"{provider}:{model}\n", style="cyan")
+    body.append("  目录  ", style="dim")
+    body.append(f"{workdir}\n\n", style="white")
+    body.append("  ", style="")
+    for key, desc in (("/help", "命令"), ("Ctrl+M", "切换模型"),
+                      ("Ctrl+L", "清屏"), ("Ctrl+Q", "退出")):
+        body.append(f"{key}", style="bold yellow")
+        body.append(f" {desc}   ", style="dim")
+    return Panel(
+        body,
+        border_style="cyan",
+        box=box.ROUNDED,
+        padding=(1, 2),
     )
 
 
@@ -302,37 +327,46 @@ class AgentTUIApp(App[None]):
     CSS = """
     Screen { background: $background; }
     #main_row { height: 1fr; }
-    
-    #chat_panel { 
-        width: 1fr; 
-        layout: vertical; 
+
+    #chat_panel {
+        width: 1fr;
+        layout: vertical;
         border: none;
     }
-    #chat { height: 1fr; padding: 0 2; }
-    
-    #status_row { 
-        height: 1; 
-        layout: horizontal; 
+    #chat {
+        height: 1fr;
+        padding: 1 3;
+        scrollbar-color: $primary 30%;
+        scrollbar-size: 1 1;
+    }
+
+    #status_row {
+        height: 1;
+        layout: horizontal;
         padding: 0 2;
+        background: $panel;
         color: $text-muted;
     }
-    
-    #input_panel { 
-        height: auto; 
-        border-top: solid $primary;
-        padding: 1 2;
+    #status_label { width: 1fr; content-align: left middle; }
+    #clock_label { width: auto; content-align: right middle; color: $text-muted; }
+
+    #input_panel {
+        height: auto;
+        border: round $primary;
+        padding: 0 1;
+        margin: 0 1 1 1;
         background: $surface;
     }
-    #prompt { 
-        width: 1fr; 
+    #prompt {
+        width: 1fr;
         border: none;
         background: $surface;
     }
-    
+
     #loading_container {
         width: 100%;
         height: auto;
-        padding: 0 2;
+        padding: 0 3;
         display: none;
     }
     #loading_container.visible {
@@ -371,11 +405,11 @@ class AgentTUIApp(App[None]):
                 yield RichLog(id="chat", highlight=True, markup=True, auto_scroll=True)
             
             with Horizontal(id="status_row"):
-                yield Label("✓ Ready", id="status_label")
+                yield Label("[green]● Ready[/]", id="status_label")
                 yield Label("", id="clock_label")
             
             with Vertical(id="loading_container"):
-                yield Label("⏳ [yellow]Thinking...[/]", id="loading_text")
+                yield Label("[yellow]◐ 思考中…[/]", id="loading_text")
 
             with Vertical(id="input_panel"):
                 yield _HistoryInput(
@@ -391,7 +425,7 @@ class AgentTUIApp(App[None]):
         callbacks = AgentCallbacks(
             on_tool_start=lambda n, a: self.call_from_thread(
                 lambda: self._chat_write(
-                    f"  [yellow dim]⚙ {n}[/] "
+                    f"  [on $boost] [yellow]⚙[/] [bold yellow]{n}[/] [/]"
                     f"[dim]{preview_text(json.dumps(a, ensure_ascii=False), 60)}[/]")),
             on_tool_end=lambda n, r: None,
             on_todo_update=lambda: self.call_from_thread(self._refresh_todo),
@@ -399,6 +433,11 @@ class AgentTUIApp(App[None]):
 
         self._provider, _, self._agent = create_agent(
             callbacks, ask_user_hook=self._hook_ask_user)
+
+        provider = self._agent.provider_name if self._agent else CFG.llm_provider
+        model = self._provider.model_name if self._provider else CFG.llm_model
+        self.query_one("#chat", RichLog).write(
+            _welcome_banner(provider, model, str(CFG.workdir)))
 
         self._refresh_todo()
         self._update_title()
@@ -422,7 +461,7 @@ class AgentTUIApp(App[None]):
             prompt.focus()
         
         self.query_one("#status_label", Label).update(
-            "[yellow]Working...[/]" if value else "[green]Ready[/]")
+            "[yellow]◐ Working…[/]" if value else "[green]● Ready[/]")
 
     # ── UI 辅助 ──
 
@@ -453,8 +492,9 @@ class AgentTUIApp(App[None]):
                 else:
                     self._chat_write(before)
 
-            thinking_body = match.group(1)
-            self._chat_write("[dim]thinking:" + thinking_body)
+            thinking_body = match.group(1).strip()
+            if thinking_body:
+                self._chat_write(f"[dim italic]  ┊ 思考  {thinking_body}[/]")
             pos = match.end()
 
         tail = content[pos:]
@@ -487,8 +527,9 @@ class AgentTUIApp(App[None]):
         self.title = f"Coding Agent - {provider}: {name}"
 
     def _tick_clock(self):
+        model = self._provider.model_name if self._provider else CFG.llm_model
         self.query_one("#clock_label", Label).update(
-            datetime.now().strftime("%H:%M:%S"))
+            f"[dim]{model}[/]  [dim]{datetime.now().strftime('%H:%M:%S')}[/]")
 
     def _refresh_todo(self):
         # 仅有待办时输出，避免空字符串污染聊天区
@@ -721,7 +762,7 @@ class AgentTUIApp(App[None]):
     @work(exclusive=True, thread=True)
     def _send(self, text: str):
         """在后台 Worker 中执行 Agent generator，直接消费流。"""
-        self.call_from_thread(lambda: self._chat_write(f"\n[bold cyan]>[/]  [blue]{text}[/]"))
+        self.call_from_thread(lambda: self._chat_write(f"\n[bold cyan]▌ You[/]\n[cyan]{text}[/]"))
         self.busy = True
         self._interrupt_requested = False
         worker = get_current_worker()
@@ -744,9 +785,8 @@ class AgentTUIApp(App[None]):
                 elif event["type"] == "text":
                     self.call_from_thread(
                         lambda t=event["content"]: (
-                            self._chat_write("\n[bold green]Assistant[/]"),
+                            self._chat_write("\n[bold green]● Assistant[/]"),
                             self._write_assistant_content(t),
-                            # self._chat_write(f"[dim]{'─'*50}[/]"),
                         )
                     )
 
