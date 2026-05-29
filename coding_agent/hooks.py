@@ -13,7 +13,7 @@ Hook 系统：在 Agent 主循环外注入扩展行为。
   - 2: 注入消息（stderr 作为注入内容）
 
 配置文件：仅使用 coding_agent/.hooks/.hooks.json（严格模式）
-信任标记：仅使用 coding_agent/.agent/.agent_trusted（或 sdk_mode=True）
+信任标记：仅使用 .agent/.agent_trusted（或 sdk_mode=True）
 """
 
 from __future__ import annotations

@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""全局配置：Pydantic Settings，从 JSON / 环境变量自动加载。"""
+"""全局配置：Pydantic Settings，从强类型 JSON / 环境变量自动加载。"""
 
 from __future__ import annotations
 
-import json
 import os
+import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,31 +30,11 @@ def _find_json_config_file() -> Path | None:
     return None
 
 
-def _json_value_to_env(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return str(value)
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _set_env_default(name: str, value: object) -> None:
-    if value is None:
-        return
-    os.environ.setdefault(name, _json_value_to_env(value))
-
-
-def _load_json_config_into_env() -> None:
-    """
-    将可选 JSON 配置写入环境变量默认值。
-
-    优先级：命令行/真实环境变量 > JSON > 代码默认值。
-    """
+def _load_json_config_data() -> dict[str, Any]:
+    """读取并扁平化可选 JSON 配置，返回 AgentConfig 字段名。"""
     path = _find_json_config_file()
     if not path:
-        return
+        return {}
     if not path.exists():
         raise FileNotFoundError(f"JSON 配置文件不存在: {path}")
 
@@ -61,17 +42,37 @@ def _load_json_config_into_env() -> None:
         data = json.load(f)
     if not isinstance(data, dict):
         raise ValueError(f"JSON 配置文件必须是对象: {path}")
+    return _flatten_json_config(data)
 
-    # 支持平铺环境变量写法，例如 {"AGENT_MODEL": "gpt-4o"}。
+
+def _flatten_json_config(data: dict[str, Any]) -> dict[str, Any]:
+    """支持结构化 JSON 和环境变量式平铺 JSON。"""
+    result: dict[str, Any] = {}
+
+    env_key_map = {
+        "GEMINI_API_KEY": "gemini_api_key",
+        "OPENAI_API_KEY": "openai_api_key",
+        "ANTHROPIC_API_KEY": "anthropic_api_key",
+        "OPENAI_BASE_URL": "openai_base_url",
+        "AGENT_PROVIDER": "llm_provider",
+        "AGENT_MODEL": "llm_model",
+        "KNOWN_MODELS": "known_models",
+        "OLLAMA_BASE_URL": "ollama_base_url",
+    }
     for key, value in data.items():
-        if key.isupper():
-            _set_env_default(key, value)
+        if key in env_key_map:
+            result[env_key_map[key]] = value
+        elif key.islower():
+            result[key] = value
 
     llm = data.get("llm")
     if isinstance(llm, dict):
-        _set_env_default("AGENT_PROVIDER", llm.get("provider"))
-        _set_env_default("AGENT_MODEL", llm.get("model"))
-        _set_env_default("KNOWN_MODELS", llm.get("known_models"))
+        if llm.get("provider") is not None:
+            result["llm_provider"] = llm["provider"]
+        if llm.get("model") is not None:
+            result["llm_model"] = llm["model"]
+        if llm.get("known_models") is not None:
+            result["known_models"] = llm["known_models"]
 
     providers = data.get("providers")
     if not isinstance(providers, dict):
@@ -79,33 +80,64 @@ def _load_json_config_into_env() -> None:
 
     gemini = providers.get("gemini") if isinstance(providers, dict) else None
     if isinstance(gemini, dict):
-        _set_env_default("GEMINI_API_KEY", gemini.get("api_key"))
+        if gemini.get("api_key") is not None:
+            result["gemini_api_key"] = gemini["api_key"]
 
     openai = providers.get("openai") if isinstance(providers, dict) else None
     if isinstance(openai, dict):
-        _set_env_default("OPENAI_API_KEY", openai.get("api_key"))
-        _set_env_default("OPENAI_BASE_URL", openai.get("base_url"))
+        if openai.get("api_key") is not None:
+            result["openai_api_key"] = openai["api_key"]
+        if openai.get("base_url") is not None:
+            result["openai_base_url"] = openai["base_url"]
 
     anthropic = providers.get("anthropic") if isinstance(providers, dict) else None
     if isinstance(anthropic, dict):
-        _set_env_default("ANTHROPIC_API_KEY", anthropic.get("api_key"))
+        if anthropic.get("api_key") is not None:
+            result["anthropic_api_key"] = anthropic["api_key"]
 
     claude = providers.get("claude") if isinstance(providers, dict) else None
     if isinstance(claude, dict):
-        _set_env_default("ANTHROPIC_API_KEY", claude.get("api_key"))
+        if claude.get("api_key") is not None:
+            result["anthropic_api_key"] = claude["api_key"]
 
     ollama = providers.get("ollama") if isinstance(providers, dict) else None
     if isinstance(ollama, dict):
-        _set_env_default("OLLAMA_BASE_URL", ollama.get("base_url"))
-
-
-_load_json_config_into_env()
+        if ollama.get("base_url") is not None:
+            result["ollama_base_url"] = ollama["base_url"]
+    return result
 
 
 class AgentConfig(BaseSettings):
     model_config = SettingsConfigDict(
         extra="ignore",
+        populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return env_settings, init_settings, file_secret_settings
+
+    @classmethod
+    def load(cls, json_path: str | Path | None = None) -> "AgentConfig":
+        """Load config from JSON defaults, with real environment variables overriding."""
+        old = os.environ.get("AGENT_CONFIG_FILE")
+        if json_path is not None:
+            os.environ["AGENT_CONFIG_FILE"] = str(json_path)
+        try:
+            return cls(**_load_json_config_data())
+        finally:
+            if json_path is not None:
+                if old is None:
+                    os.environ.pop("AGENT_CONFIG_FILE", None)
+                else:
+                    os.environ["AGENT_CONFIG_FILE"] = old
 
     # ── API Keys ──
     gemini_api_key: str = ""
@@ -160,9 +192,14 @@ class AgentConfig(BaseSettings):
 
     # ── 日志 / UI ──
     log_enabled: bool = True
+    trace_enabled: bool = True
     wait_indicator: bool = True
     todo_visual: bool = True
     need_notify: bool = Field(default=False, alias="AGENT_NOTIFY")
+
+    # ── Session checkpoint ──
+    session_checkpoint_enabled: bool = Field(default=True, alias="AGENT_SESSION_CHECKPOINT")
+    session_resume_on_start: bool = Field(default=False, alias="AGENT_SESSION_RESUME")
 
     # ── Hook 系统 ──
     hook_timeout: int = Field(default=30, alias="AGENT_HOOK_TIMEOUT")
@@ -171,13 +208,14 @@ class AgentConfig(BaseSettings):
     # ── MCP / 插件（.claude-plugin/plugin.json）──
     mcp_enabled: bool = Field(default=True, alias="AGENT_MCP_ENABLED")
     mcp_permission_mode: str = Field(default="default", alias="AGENT_MCP_PERMISSION_MODE")
+    tool_permission_mode: str = Field(default="auto", alias="AGENT_TOOL_PERMISSION_MODE")
 
     # ── Ollama ──
     ollama_base_url: str = "http://localhost:11434"
 
     @property
     def resolved_output_dir(self) -> Path:
-        return self.output_dir or (self.pkg_dir / ".agent")
+        return self.output_dir or (self.workdir / ".agent")
 
     @property
     def log_dir(self) -> Path:
@@ -204,6 +242,14 @@ class AgentConfig(BaseSettings):
         return self.resolved_output_dir / "transcripts"
 
     @property
+    def trace_file(self) -> Path:
+        return self.resolved_output_dir / "traces" / "agent_trace.jsonl"
+
+    @property
+    def session_checkpoint_file(self) -> Path:
+        return self.resolved_output_dir / "session_checkpoint.json"
+
+    @property
     def todo_file(self) -> Path:
         return self.resolved_output_dir / "todo.json"
 
@@ -217,7 +263,7 @@ class AgentConfig(BaseSettings):
 
 
 # ── 全局单例 ──
-CFG = AgentConfig()
+CFG = AgentConfig.load()
 
 
 # ── Prompt 常量 ──

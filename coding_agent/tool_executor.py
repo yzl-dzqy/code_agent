@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from .config import CFG
 from .hooks import HookManager
 from .llm.base import ToolCall
+from .tool_policy import ToolExecutionPolicy
 from .utils.log import log, preview_text
 from .utils.metrics import METRICS
 
@@ -34,12 +35,14 @@ class ToolExecutor:
         hooks: HookManager,
         window: ContextWindow,
         compactor: Compactor,
+        policy: ToolExecutionPolicy | None = None,
     ):
         self.tools = tools
         self.callbacks = callbacks
         self.hooks = hooks
         self.window = window
         self.compactor = compactor
+        self.policy = policy or ToolExecutionPolicy()
         self._executor = ThreadPoolExecutor(max_workers=4)
 
     def execute_all(self, tool_calls: list[ToolCall]) -> list[str]:
@@ -52,7 +55,7 @@ class ToolExecutor:
 
         for i, tc in enumerate(tool_calls):
             td = self.tools.get(tc.name)
-            if td and td.parallel:
+            if self.policy.can_run_parallel(td, tc):
                 parallel_group.append((i, tc))
             else:
                 serial_group.append((i, tc))
@@ -91,29 +94,28 @@ class ToolExecutor:
             log("INFO", "hook_updated_input",
                 f"{tc.name}: {preview_text(json.dumps(tool_input, ensure_ascii=False), 80)}")
 
-        if tc.name.startswith("mcp__"):
-            from ..mcp.permission import get_permission_gate
-            gate = get_permission_gate()
-            decision = gate.check(tc.name, tool_input)
-            if decision["behavior"] == "ask":
-                intent = decision["intent"]
-                preview = json.dumps(tool_input, ensure_ascii=False)[:400]
-                src = (
-                    f"mcp:{intent.get('server')}/{intent['tool']}"
-                    if intent.get("server")
-                    else intent["tool"]
-                )
-                q = (
-                    f"[MCP 权限] 是否允许执行 {src} (risk={intent['risk']})？\n"
-                    f"参数预览:\n{preview}\n\n回复 yes 确认，其它取消。"
-                )
-                if self.callbacks.ask_user:
-                    ans = self.callbacks.ask_user(q, "n").strip().lower()
-                else:
-                    from .tools.builtin.user import ask_user as _ask_user_mcp
-                    ans = _ask_user_mcp(q, "n").strip().lower()
-                if ans not in ("y", "yes"):
-                    return f"Permission denied: {decision['reason']}"
+        decision = self.policy.check_permission(tc.name, tool_input)
+        if decision["behavior"] == "ask":
+            intent = decision["intent"]
+            preview = json.dumps(tool_input, ensure_ascii=False)[:400]
+            source = intent.get("source") or "native"
+            server = intent.get("server")
+            src = (
+                f"{source}:{server}/{intent['tool']}"
+                if server
+                else f"{source}:{intent['tool']}"
+            )
+            q = (
+                f"[工具权限] 是否允许执行 {src} (risk={intent['risk']})？\n"
+                f"参数预览:\n{preview}\n\n回复 yes 确认，其它取消。"
+            )
+            if self.callbacks.ask_user:
+                ans = self.callbacks.ask_user(q, "n").strip().lower()
+            else:
+                from .tools.builtin.user import ask_user as _ask_user
+                ans = _ask_user(q, "n").strip().lower()
+            if ans not in ("y", "yes"):
+                return f"Permission denied: {decision['reason']}"
 
         if self.callbacks.on_tool_start:
             self.callbacks.on_tool_start(tc.name, tool_input)

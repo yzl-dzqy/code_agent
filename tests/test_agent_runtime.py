@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from coding_agent.agent import Agent
+from coding_agent.config import AgentConfig, CFG
+from coding_agent.context.checkpoint import SessionCheckpoint
 from coding_agent.context.window import ContextWindow
 from coding_agent.hooks import HookResult
 from coding_agent.llm.base import Message, ToolCall
 from coding_agent.llm.recovery import LLMRecoveryPolicy
+from coding_agent.tool_policy import ToolExecutionPolicy
 from coding_agent.tools.base import ToolDef
 from coding_agent.tools.registry import ToolRegistry
+from coding_agent.utils.trace import TraceRecorder
 
 
 class FakeProvider:
@@ -174,6 +182,107 @@ class AgentLoopTests(unittest.TestCase):
 
         self.assertEqual(result, "done")
         self.assertEqual(responses_seen_tool_counts, [1, 2])
+
+    def test_max_rounds_returns_guardrail_message(self):
+        old_max = CFG.max_tool_rounds
+        CFG.max_tool_rounds = 1
+        provider = FakeProvider([
+            Message.assistant(tool_calls=[
+                ToolCall(id="call-1", name="noop", arguments={})
+            ])
+        ])
+        registry = ToolRegistry()
+        registry.register(ToolDef(
+            name="noop",
+            description="noop",
+            fn=lambda: "ok",
+            parameters={"type": "object", "properties": {}},
+        ))
+
+        try:
+            with patch("coding_agent.agent.SCHEDULER.start", lambda: None):
+                agent = Agent(provider, registry, hooks=EmptyHooks())
+                result = agent.chat("loop")
+        finally:
+            CFG.max_tool_rounds = old_max
+
+        self.assertIn("达到工具调用轮数上限", result)
+
+
+class ConfigPolicyCheckpointTraceTests(unittest.TestCase):
+    def test_agent_config_loads_structured_json_with_env_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent_config.json"
+            path.write_text(json.dumps({
+                "llm": {"provider": "openai", "model": "json-model"},
+                "openai": {
+                    "api_key": "json-key",
+                    "base_url": "https://json.example/v1",
+                },
+            }), encoding="utf-8")
+            old_model = os.environ.get("AGENT_MODEL")
+            os.environ["AGENT_MODEL"] = "env-model"
+            try:
+                cfg = AgentConfig.load(path)
+            finally:
+                if old_model is None:
+                    os.environ.pop("AGENT_MODEL", None)
+                else:
+                    os.environ["AGENT_MODEL"] = old_model
+
+        self.assertEqual(cfg.llm_provider, "openai")
+        self.assertEqual(cfg.llm_model, "env-model")
+        self.assertEqual(cfg.openai_api_key, "json-key")
+
+    def test_tool_policy_parallelizes_only_read_capabilities(self):
+        policy = ToolExecutionPolicy()
+        read_def = ToolDef(
+            name="read_file",
+            description="read",
+            fn=lambda path: "",
+            parameters={"type": "object", "properties": {}},
+            parallel=True,
+        )
+        write_def = ToolDef(
+            name="write_file",
+            description="write",
+            fn=lambda path, content: "",
+            parameters={"type": "object", "properties": {}},
+            parallel=True,
+        )
+
+        self.assertTrue(policy.can_run_parallel(read_def, ToolCall("1", "read_file", {"path": "a"})))
+        self.assertFalse(policy.can_run_parallel(write_def, ToolCall("2", "write_file", {"path": "a"})))
+
+    def test_tool_policy_requires_permission_for_high_risk_native_command(self):
+        decision = ToolExecutionPolicy().check_permission("bash", {"command": "sudo reboot"})
+        self.assertEqual(decision["behavior"], "ask")
+        self.assertEqual(decision["intent"]["risk"], "high")
+
+    def test_checkpoint_round_trips_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = SessionCheckpoint(Path(tmp) / "checkpoint.json")
+            messages = [
+                Message.user("hello"),
+                Message.assistant(tool_calls=[ToolCall("call-1", "read_file", {"path": "a.py"})]),
+                Message.tool_result("call-1", "read_file", "content"),
+            ]
+            checkpoint.save(messages)
+            loaded = checkpoint.load()
+
+        self.assertEqual(len(loaded), 3)
+        self.assertEqual(loaded[1].tool_calls[0].name, "read_file")
+        self.assertEqual(loaded[2].content, "content")
+
+    def test_trace_recorder_writes_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            trace = TraceRecorder(path)
+            trace.record("turn_start", turn=1)
+            payload = json.loads(path.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(payload["event"], "turn_start")
+        self.assertEqual(payload["turn"], 1)
 
 
 if __name__ == "__main__":
