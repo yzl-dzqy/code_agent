@@ -610,18 +610,10 @@ class AgentTUIApp(App[None]):
                 )
                 lines.append("[dim]用法: /model <provider:model> 或 /model <provider> <model>[/]")
                 self._chat_write("\n".join(lines))
+            elif len(parts) >= 3:
+                self._apply_model_switch(parts[2], provider_name=parts[1])
             else:
-                try:
-                    if len(parts) >= 3:
-                        old, new = self._agent.switch_model(parts[2], provider_name=parts[1])
-                    else:
-                        old, new = self._agent.switch_model(parts[1])
-                except Exception as exc:
-                    self._chat_write(f"[red]切换失败:[/] {exc}")
-                else:
-                    self._provider = self._agent.provider
-                    self._update_title()
-                    self._chat_write(f"[dim]模型切换: {old.ref} → [bold]{new.ref}[/][/]")
+                self._apply_model_switch(parts[1])
             return True
 
         handlers = {
@@ -793,23 +785,31 @@ class AgentTUIApp(App[None]):
         self.query_one("#status_label", Label).update("[yellow]Interrupting...[/]")
         self._chat_write("[yellow]正在请求中断当前生成...[/]")
 
-    def action_switch_model(self):
-        def on_selected(model: str | None):
-            if not model or not self._provider or not self._agent:
-                return
-            try:
-                old, new = self._agent.switch_model(model)
-            except Exception as exc:
-                self._chat_write(f"[red]切换失败:[/] {exc}")
-                return
-            self._provider = self._agent.provider
-            self._update_title()
-            self._chat_write(f"[dim]模型切换: {old.ref} → [bold]{new.ref}[/][/]")
+    def _apply_model_switch(self, model_ref: str, provider_name: str | None = None) -> None:
+        """统一的模型切换入口：始终经 agent.switch_model 重建 provider 并同步 UI 状态。
 
-        self.push_screen(ModelSwitchModal(
-            f"{self._agent.provider_name}:{self._provider.model_name}"
-            if self._provider and self._agent else ""),
-            callback=on_selected)
+        TUI 的弹窗回调与 /model 命令都复用此方法，避免切换逻辑分散重复。
+        """
+        if not self._agent or not model_ref:
+            return
+        try:
+            old, new = self._agent.switch_model(model_ref, provider_name=provider_name)
+        except Exception as exc:
+            self._chat_write(f"[red]切换失败:[/] {exc}")
+            return
+        # agent 内部已重建 provider 实例，同步 UI 持有的引用与标题
+        self._provider = self._agent.provider
+        self._update_title()
+        self._chat_write(f"[dim]模型切换: {old.ref} → [bold]{new.ref}[/][/]")
+
+    def action_switch_model(self):
+        if not self._agent or not self._provider:
+            return
+        current = f"{self._agent.provider_name}:{self._provider.model_name}"
+        self.push_screen(
+            ModelSwitchModal(current),
+            callback=lambda ref: self._apply_model_switch(ref) if ref else None,
+        )
 
     def action_export_chat(self):
         if self._agent:

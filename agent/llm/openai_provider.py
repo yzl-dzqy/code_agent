@@ -18,6 +18,8 @@ class OpenAIProvider:
         self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self._async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
+        self._encoder = None          # tiktoken 编码器缓存
+        self._encoder_failed = False  # 标记当前模型无可用编码器，避免重复探测
 
     @property
     def model_name(self) -> str:
@@ -26,6 +28,9 @@ class OpenAIProvider:
     @model_name.setter
     def model_name(self, v: str):
         self._model = v
+        # 切换模型后重置编码器缓存，下次按需重新解析
+        self._encoder = None
+        self._encoder_failed = False
 
     def _to_oai_messages(self, messages: list[Message], system: str) -> list[dict]:
         """将 Message 列表转为 Chat Completions 的 messages（含 tool_calls / tool）。"""
@@ -161,10 +166,17 @@ class OpenAIProvider:
         yield StreamChunk(type="done")
 
     def count_tokens(self, text: str) -> int:
-        """优先 tiktoken，否则按字符粗估。"""
-        try:
-            import tiktoken
-            enc = tiktoken.encoding_for_model(self._model)
-            return len(enc.encode(text))
-        except Exception:
-            return len(text) // 4
+        """优先 tiktoken（带缓存），否则按字符粗估。
+
+        对 ollama/deepseek 等非 OpenAI 模型，encoding_for_model 会失败；
+        缓存失败标记后回退到字符估算，避免每次都重复探测。
+        """
+        if self._encoder is None and not self._encoder_failed:
+            try:
+                import tiktoken
+                self._encoder = tiktoken.encoding_for_model(self._model)
+            except Exception:
+                self._encoder_failed = True
+        if self._encoder is not None:
+            return len(self._encoder.encode(text))
+        return len(text) // 4

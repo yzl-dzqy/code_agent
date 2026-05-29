@@ -1,0 +1,6 @@
+*.env
+.agent/
+agent_config.json
+*.pyc
+*.cursor*
+*.vscode

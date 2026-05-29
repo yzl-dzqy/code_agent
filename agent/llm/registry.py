@@ -41,15 +41,22 @@ def normalize_provider(name: str) -> str:
     return provider
 
 
+# 模型名前缀 → provider 推断表（按从具体到通用的顺序匹配）。
+_MODEL_PREFIX_PROVIDERS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("gemini-", "models/gemini-"), "gemini"),
+    (("gpt-", "chatgpt-", "o1", "o3", "o4"), "openai"),
+    (("claude-",), "claude"),
+    # 本地 / Ollama 常见开源模型族
+    (("qwen", "llama", "mistral", "mixtral", "gemma", "phi", "deepseek-coder", "codellama"), "ollama"),
+)
+
+
 def infer_provider_from_model(model: str, default_provider: str) -> str:
     """根据常见模型名前缀推断 provider，无法推断时沿用当前 provider。"""
     lower = (model or "").strip().lower()
-    if lower.startswith("gemini-"):
-        return "gemini"
-    if lower.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4")):
-        return "openai"
-    if lower.startswith("claude-"):
-        return "claude"
+    for prefixes, provider in _MODEL_PREFIX_PROVIDERS:
+        if lower.startswith(prefixes):
+            return provider
     return normalize_provider(default_provider)
 
 
