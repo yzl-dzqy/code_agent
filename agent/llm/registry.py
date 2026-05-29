@@ -101,7 +101,11 @@ def get_provider(
         from .gemini import GeminiProvider
         if not cfg.gemini_api_key:
             raise RuntimeError("未设置 GEMINI_API_KEY")
-        return GeminiProvider(api_key=cfg.gemini_api_key, model=model)
+        return GeminiProvider(
+            api_key=cfg.gemini_api_key,
+            model=model,
+            base_url=cfg.gemini_base_url or None,
+        )
 
     if name in ("openai", "gpt"):
         from .openai_provider import OpenAIProvider

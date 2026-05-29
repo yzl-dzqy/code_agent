@@ -15,8 +15,11 @@ from .base import Message, StreamChunk, ToolCall, ToolSpec
 class GeminiProvider:
     """基于 google-genai SDK 的 Gemini 实现。"""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
-        self._client = genai.Client(api_key=api_key)
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", base_url: str | None = None):
+        # base_url 指向兼容 Gemini 原生端点的网关时，走原生 functionDeclarations 格式，
+        # 绕过 OpenAI 兼容层的 schema 转换 bug。
+        http_options = genai.types.HttpOptions(base_url=base_url) if base_url else None
+        self._client = genai.Client(api_key=api_key, http_options=http_options)
         self._model = model
 
     @property

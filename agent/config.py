@@ -51,6 +51,7 @@ def _flatten_json_config(data: dict[str, Any]) -> dict[str, Any]:
 
     env_key_map = {
         "GEMINI_API_KEY": "gemini_api_key",
+        "GEMINI_BASE_URL": "gemini_base_url",
         "OPENAI_API_KEY": "openai_api_key",
         "ANTHROPIC_API_KEY": "anthropic_api_key",
         "OPENAI_BASE_URL": "openai_base_url",
@@ -82,6 +83,8 @@ def _flatten_json_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(gemini, dict):
         if gemini.get("api_key") is not None:
             result["gemini_api_key"] = gemini["api_key"]
+        if gemini.get("base_url") is not None:
+            result["gemini_base_url"] = gemini["base_url"]
 
     openai = providers.get("openai") if isinstance(providers, dict) else None
     if isinstance(openai, dict):
@@ -141,6 +144,7 @@ class AgentConfig(BaseSettings):
 
     # ── API Keys ──
     gemini_api_key: str = ""
+    gemini_base_url: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     openai_base_url: str = ""
